@@ -9,11 +9,11 @@ permissions:
 
 jobs:
   build:
-    name: Build Android APK
+    name: Build MATAEL APK
     runs-on: ubuntu-latest
 
     steps:
-      - name: Download source code
+      - name: Checkout source
         uses: actions/checkout@v4
 
       - name: Set up Java 17
@@ -22,15 +22,22 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        run: |
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
       - name: Set up Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
 
-      - name: Build MATAEL APK
+      - name: Build debug APK
         run: gradle :app:assembleDebug
 
-      - name: Save APK
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: MATAEL-APK
