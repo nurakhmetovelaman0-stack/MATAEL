@@ -22,7 +22,11 @@ jobs:
           java-version: '17'
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
+        with:
+          accept-android-sdk-licenses: 'true'
+          log-accepted-android-sdk-licenses: 'false'
+          packages: ''
 
       - name: Accept Android SDK licenses
         run: yes | sdkmanager --licenses
@@ -36,10 +40,10 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Build debug APK
+      - name: Build MATAEL APK
         run: gradle --no-daemon :app:assembleDebug
 
-      - name: Upload APK
+      - name: Upload MATAEL APK
         uses: actions/upload-artifact@v4
         with:
           name: MATAEL-APK
