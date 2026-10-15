@@ -3,10 +3,12 @@ package com.matael.app;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.net.Uri;
 import android.os.Bundle;
 import android.text.InputType;
 import android.view.Gravity;
@@ -25,16 +27,23 @@ import android.security.keystore.KeyProperties;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyStore;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
+import java.util.HashSet;
 import java.util.UUID;
 
 import javax.crypto.Cipher;
 import javax.crypto.KeyGenerator;
 import javax.crypto.SecretKey;
+import javax.crypto.SecretKeyFactory;
 import javax.crypto.spec.GCMParameterSpec;
+import javax.crypto.spec.PBEKeySpec;
+import javax.crypto.spec.SecretKeySpec;
 
 public class MainActivity extends Activity {
 
@@ -45,9 +54,23 @@ public class MainActivity extends Activity {
 
     private SharedPreferences prefs;
 
-    private static final String KEY_ALIAS = "matael_notes_aes_key";
-    private static final String NOTES_KEY = "notes_encrypted";
-    private static final String OLD_NOTES_KEY = "notes_json";
+    private static final String KEY_ALIAS =
+        "matael_notes_aes_key";
+
+    private static final String NOTES_KEY =
+        "notes_encrypted";
+
+    private static final String OLD_NOTES_KEY =
+        "notes_json";
+
+    private static final int REQUEST_EXPORT_BACKUP = 4101;
+    private static final int REQUEST_IMPORT_BACKUP = 4102;
+
+    private static final int BACKUP_ITERATIONS = 150000;
+    private static final int MAX_BACKUP_BYTES =
+        20 * 1024 * 1024;
+
+    private String pendingBackupText = null;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -57,7 +80,8 @@ public class MainActivity extends Activity {
         getWindow().setNavigationBarColor(background);
 
         prefs = getSharedPreferences(
-            "matael_security", MODE_PRIVATE
+            "matael_security",
+            MODE_PRIVATE
         );
 
         showWelcome();
@@ -211,7 +235,8 @@ public class MainActivity extends Activity {
 
     private String hashPin(String salt, String pin)
             throws Exception {
-        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        MessageDigest digest =
+            MessageDigest.getInstance("SHA-256");
 
         byte[] result = digest.digest(
             (salt + ":" + pin).getBytes(StandardCharsets.UTF_8)
@@ -250,7 +275,9 @@ public class MainActivity extends Activity {
     // КЛЮЧ ШИФРОВАНИЯ ANDROID KEYSTORE
 
     private SecretKey getNotesKey() throws Exception {
-        KeyStore keyStore = KeyStore.getInstance("AndroidKeyStore");
+        KeyStore keyStore =
+            KeyStore.getInstance("AndroidKeyStore");
+
         keyStore.load(null);
 
         if (keyStore.containsAlias(KEY_ALIAS)) {
@@ -280,10 +307,12 @@ public class MainActivity extends Activity {
         return generator.generateKey();
     }
 
-    // ШИФРОВАНИЕ AES-GCM
+    // ШИФРОВАНИЕ ОСНОВНЫХ ЗАМЕТОК
 
-    private String encryptNotes(String plainText) throws Exception {
-        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+    private String encryptNotes(String plainText)
+            throws Exception {
+        Cipher cipher =
+            Cipher.getInstance("AES/GCM/NoPadding");
 
         cipher.init(Cipher.ENCRYPT_MODE, getNotesKey());
 
@@ -302,7 +331,8 @@ public class MainActivity extends Activity {
         return "v1:" + iv + ":" + data;
     }
 
-    private String decryptNotes(String stored) throws Exception {
+    private String decryptNotes(String stored)
+            throws Exception {
         String[] parts = stored.split(":", 3);
 
         if (parts.length != 3 || !"v1".equals(parts[0])) {
@@ -312,9 +342,11 @@ public class MainActivity extends Activity {
         }
 
         byte[] iv = Base64.decode(parts[1], Base64.NO_WRAP);
-        byte[] encrypted = Base64.decode(parts[2], Base64.NO_WRAP);
+        byte[] encrypted =
+            Base64.decode(parts[2], Base64.NO_WRAP);
 
-        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+        Cipher cipher =
+            Cipher.getInstance("AES/GCM/NoPadding");
 
         cipher.init(
             Cipher.DECRYPT_MODE,
@@ -333,12 +365,15 @@ public class MainActivity extends Activity {
     private JSONArray readNotes() {
         try {
             if (prefs.contains(NOTES_KEY)) {
-                String encrypted = prefs.getString(NOTES_KEY, "");
+                String encrypted =
+                    prefs.getString(NOTES_KEY, "");
+
                 return new JSONArray(decryptNotes(encrypted));
             }
 
-            // Перенос заметок из предыдущей версии.
-            String oldText = prefs.getString(OLD_NOTES_KEY, "[]");
+            String oldText =
+                prefs.getString(OLD_NOTES_KEY, "[]");
+
             JSONArray oldNotes = new JSONArray(oldText);
 
             if (!saveEncryptedNotes(oldNotes)) {
@@ -355,7 +390,8 @@ public class MainActivity extends Activity {
 
     private boolean saveEncryptedNotes(JSONArray notes) {
         try {
-            String encrypted = encryptNotes(notes.toString());
+            String encrypted =
+                encryptNotes(notes.toString());
 
             return prefs.edit()
                 .putString(NOTES_KEY, encrypted)
@@ -383,14 +419,58 @@ public class MainActivity extends Activity {
         root.setBackgroundColor(background);
 
         addText(root, "M A T A E L", 26, gold, 4, 4, true);
+
         addText(
-            root, "ТВОИ ЛИЧНЫЕ ЗАМЕТКИ",
-            12, muted, 0, 20, false
+            root,
+            "ТВОИ ЛИЧНЫЕ ЗАМЕТКИ",
+            12,
+            muted,
+            0,
+            12,
+            false
         );
 
-        Button addButton = createButton("+ НОВАЯ ЗАМЕТКА");
+        Button addButton =
+            createButton("+ НОВАЯ ЗАМЕТКА");
+
         addButton.setOnClickListener(v -> editNote(null));
         root.addView(addButton, buttonParams());
+
+        // КНОПКИ РЕЗЕРВНОГО КОПИРОВАНИЯ
+
+        LinearLayout backupRow = new LinearLayout(this);
+        backupRow.setOrientation(LinearLayout.HORIZONTAL);
+
+        Button exportButton =
+            createButton("ЭКСПОРТ");
+
+        Button importButton =
+            createButton("ИМПОРТ");
+
+        LinearLayout.LayoutParams halfButton =
+            new LinearLayout.LayoutParams(
+                0,
+                52,
+                1f
+            );
+
+        halfButton.setMargins(0, 8, 5, 8);
+        backupRow.addView(exportButton, halfButton);
+
+        LinearLayout.LayoutParams secondHalf =
+            new LinearLayout.LayoutParams(
+                0,
+                52,
+                1f
+            );
+
+        secondHalf.setMargins(5, 8, 0, 8);
+        backupRow.addView(importButton, secondHalf);
+
+        exportButton.setOnClickListener(v -> askBackupPassword());
+        importButton.setOnClickListener(v -> chooseBackupFile());
+
+        root.addView(backupRow);
 
         ScrollView scroll = new ScrollView(this);
 
@@ -400,14 +480,17 @@ public class MainActivity extends Activity {
 
         if (notes.length() == 0) {
             TextView empty = new TextView(this);
+
             empty.setText(
                 "Здесь пока пусто\n\n" +
                 "Нажми «Новая заметка», чтобы сохранить первую мысль."
             );
+
             empty.setTextColor(muted);
             empty.setTextSize(15);
             empty.setGravity(Gravity.CENTER);
             empty.setPadding(12, 45, 12, 45);
+
             list.addView(empty);
         }
 
@@ -429,20 +512,28 @@ public class MainActivity extends Activity {
             GradientDrawable shape = new GradientDrawable();
             shape.setColor(cardColor);
             shape.setCornerRadius(18);
+
             card.setBackground(shape);
 
             TextView heading = new TextView(this);
+
             heading.setText(
                 title.isEmpty() ? "Без названия" : title
             );
+
             heading.setTextColor(gold);
             heading.setTextSize(17);
-            heading.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+            heading.setTypeface(
+                Typeface.DEFAULT,
+                Typeface.BOLD
+            );
 
             TextView preview = new TextView(this);
+
             preview.setText(
                 body.isEmpty() ? "Пустая заметка" : body
             );
+
             preview.setTextColor(Color.WHITE);
             preview.setTextSize(14);
             preview.setMaxLines(3);
@@ -450,6 +541,7 @@ public class MainActivity extends Activity {
 
             card.addView(heading);
             card.addView(preview);
+
             card.setOnClickListener(v -> editNote(id));
 
             LinearLayout.LayoutParams cardParams =
@@ -464,11 +556,18 @@ public class MainActivity extends Activity {
 
         scroll.addView(list);
 
-        root.addView(scroll, new LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
-        ));
+        root.addView(
+            scroll,
+            new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+            )
+        );
 
-        Button lockButton = createButton("ЗАБЛОКИРОВАТЬ");
+        Button lockButton =
+            createButton("ЗАБЛОКИРОВАТЬ");
+
         lockButton.setOnClickListener(v -> showWelcome());
 
         root.addView(lockButton, buttonParams());
@@ -515,10 +614,12 @@ public class MainActivity extends Activity {
         titleInput.setTextColor(Color.BLACK);
         titleInput.setHintTextColor(Color.GRAY);
         titleInput.setTextSize(17);
+
         titleInput.setInputType(
             InputType.TYPE_CLASS_TEXT |
             InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
         );
+
         titleInput.setBackgroundColor(Color.WHITE);
         titleInput.setPadding(12, 8, 12, 8);
 
@@ -530,17 +631,24 @@ public class MainActivity extends Activity {
         bodyInput.setGravity(Gravity.TOP);
         bodyInput.setMinLines(6);
         bodyInput.setMaxLines(12);
+
         bodyInput.setInputType(
             InputType.TYPE_CLASS_TEXT |
             InputType.TYPE_TEXT_FLAG_MULTI_LINE |
             InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
         );
+
         bodyInput.setBackgroundColor(Color.WHITE);
         bodyInput.setPadding(12, 10, 12, 10);
 
         if (!isNew && existing != null) {
-            titleInput.setText(existing.optString("title", ""));
-            bodyInput.setText(existing.optString("body", ""));
+            titleInput.setText(
+                existing.optString("title", "")
+            );
+
+            bodyInput.setText(
+                existing.optString("body", "")
+            );
         }
 
         LinearLayout.LayoutParams fieldParams =
@@ -618,7 +726,9 @@ public class MainActivity extends Activity {
     }
 
     private JSONObject makeNote(
-        String id, String title, String body
+        String id,
+        String title,
+        String body
     ) {
         JSONObject note = new JSONObject();
 
@@ -636,7 +746,9 @@ public class MainActivity extends Activity {
     // СОХРАНЕНИЕ ЗАМЕТКИ
 
     private boolean saveNote(
-        String id, String title, String body
+        String id,
+        String title,
+        String body
     ) {
         JSONArray oldNotes = readNotes();
 
@@ -695,6 +807,513 @@ public class MainActivity extends Activity {
         return saveEncryptedNotes(newNotes);
     }
 
+    // РЕЗЕРВНАЯ КОПИЯ: ЭКСПОРТ
+
+    private void askBackupPassword() {
+        EditText password = createBackupPasswordInput();
+        EditText confirm = createBackupPasswordInput();
+
+        LinearLayout form = new LinearLayout(this);
+        form.setOrientation(LinearLayout.VERTICAL);
+        form.setPadding(20, 8, 20, 4);
+
+        password.setHint("Пароль резервной копии");
+        confirm.setHint("Повтори пароль");
+
+        LinearLayout.LayoutParams params =
+            new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            );
+
+        params.bottomMargin = 12;
+
+        form.addView(password, params);
+        form.addView(confirm, params);
+
+        AlertDialog dialog = new AlertDialog.Builder(this)
+            .setTitle("Создать резервную копию")
+            .setMessage(
+                "Придумай отдельный пароль от 8 символов. " +
+                "Без него восстановить копию не получится."
+            )
+            .setView(form)
+            .setNegativeButton("Отмена", null)
+            .setPositiveButton("Продолжить", null)
+            .create();
+
+        dialog.setOnShowListener(unused ->
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+                .setOnClickListener(v -> {
+                    String first =
+                        password.getText().toString();
+
+                    String second =
+                        confirm.getText().toString();
+
+                    if (first.length() < 8) {
+                        password.setError(
+                            "Минимум 8 символов"
+                        );
+                        return;
+                    }
+
+                    if (!first.equals(second)) {
+                        confirm.setError(
+                            "Пароли не совпадают"
+                        );
+                        return;
+                    }
+
+                    dialog.dismiss();
+                    createBackup(first);
+                })
+        );
+
+        dialog.show();
+    }
+
+    private EditText createBackupPasswordInput() {
+        EditText input = new EditText(this);
+        input.setSingleLine(true);
+        input.setTextSize(16);
+        input.setInputType(
+            InputType.TYPE_CLASS_TEXT |
+            InputType.TYPE_TEXT_VARIATION_PASSWORD
+        );
+        input.setPadding(16, 10, 16, 10);
+        return input;
+    }
+
+    private void createBackup(String password) {
+        JSONArray notes = readNotes();
+
+        if (notes == null) {
+            toast("Не удалось прочитать заметки");
+            return;
+        }
+
+        try {
+            byte[] salt = new byte[16];
+            new SecureRandom().nextBytes(salt);
+
+            byte[] iv = new byte[12];
+            new SecureRandom().nextBytes(iv);
+
+            SecretKey backupKey = deriveBackupKey(
+                password,
+                salt
+            );
+
+            Cipher cipher =
+                Cipher.getInstance("AES/GCM/NoPadding");
+
+            cipher.init(
+                Cipher.ENCRYPT_MODE,
+                backupKey,
+                new GCMParameterSpec(128, iv)
+            );
+
+            byte[] encrypted = cipher.doFinal(
+                notes.toString().getBytes(
+                    StandardCharsets.UTF_8
+                )
+            );
+
+            JSONObject backup = new JSONObject();
+
+            backup.put("format", "MATAEL_BACKUP");
+            backup.put("version", 1);
+            backup.put(
+                "salt",
+                Base64.encodeToString(salt, Base64.NO_WRAP)
+            );
+            backup.put(
+                "iv",
+                Base64.encodeToString(iv, Base64.NO_WRAP)
+            );
+            backup.put(
+                "data",
+                Base64.encodeToString(
+                    encrypted,
+                    Base64.NO_WRAP
+                )
+            );
+
+            pendingBackupText = backup.toString();
+
+            Intent intent = new Intent(
+                Intent.ACTION_CREATE_DOCUMENT
+            );
+
+            intent.addCategory(Intent.CATEGORY_OPENABLE);
+            intent.setType("application/octet-stream");
+
+            intent.putExtra(
+                Intent.EXTRA_TITLE,
+                "MATAEL-backup.matael"
+            );
+
+            startActivityForResult(
+                intent,
+                REQUEST_EXPORT_BACKUP
+            );
+
+        } catch (Exception e) {
+            pendingBackupText = null;
+            toast("Не удалось создать резервную копию");
+        }
+    }
+
+    private SecretKey deriveBackupKey(
+        String password,
+        byte[] salt
+    ) throws Exception {
+        PBEKeySpec spec = new PBEKeySpec(
+            password.toCharArray(),
+            salt,
+            BACKUP_ITERATIONS,
+            256
+        );
+
+        try {
+            SecretKeyFactory factory =
+                SecretKeyFactory.getInstance(
+                    "PBKDF2WithHmacSHA256"
+                );
+
+            byte[] key = factory.generateSecret(spec).getEncoded();
+
+            return new SecretKeySpec(key, "AES");
+
+        } finally {
+            spec.clearPassword();
+        }
+    }
+
+    // РЕЗЕРВНАЯ КОПИЯ: ВЫБОР ФАЙЛА
+
+    private void chooseBackupFile() {
+        Intent intent = new Intent(
+            Intent.ACTION_OPEN_DOCUMENT
+        );
+
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("*/*");
+
+        try {
+            startActivityForResult(
+                intent,
+                REQUEST_IMPORT_BACKUP
+            );
+        } catch (Exception e) {
+            toast("Не удалось открыть выбор файла");
+        }
+    }
+
+    @Override
+    protected void onActivityResult(
+        int requestCode,
+        int resultCode,
+        Intent data
+    ) {
+        super.onActivityResult(
+            requestCode,
+            resultCode,
+            data
+        );
+
+        if (resultCode != RESULT_OK || data == null) {
+            pendingBackupText = null;
+            return;
+        }
+
+        Uri uri = data.getData();
+
+        if (uri == null) {
+            pendingBackupText = null;
+            toast("Файл не выбран");
+            return;
+        }
+
+        if (requestCode == REQUEST_EXPORT_BACKUP) {
+            writeBackupFile(uri);
+        } else if (requestCode == REQUEST_IMPORT_BACKUP) {
+            askImportPassword(uri);
+        }
+    }
+
+    private void writeBackupFile(Uri uri) {
+        if (pendingBackupText == null) {
+            toast("Нет данных для экспорта");
+            return;
+        }
+
+        try (OutputStream output =
+                 getContentResolver().openOutputStream(uri)) {
+
+            if (output == null) {
+                throw new Exception("Не удалось открыть файл");
+            }
+
+            output.write(
+                pendingBackupText.getBytes(
+                    StandardCharsets.UTF_8
+                )
+            );
+
+            output.flush();
+
+            pendingBackupText = null;
+
+            toast("Резервная копия сохранена");
+
+        } catch (Exception e) {
+            pendingBackupText = null;
+            toast("Ошибка сохранения резервной копии");
+        }
+    }
+
+    // РЕЗЕРВНАЯ КОПИЯ: ИМПОРТ
+
+    private void askImportPassword(Uri uri) {
+        EditText input = createBackupPasswordInput();
+
+        AlertDialog dialog = new AlertDialog.Builder(this)
+            .setTitle("Восстановление заметок")
+            .setMessage(
+                "Введи пароль, который использовался " +
+                "при создании этой резервной копии."
+            )
+            .setView(input)
+            .setNegativeButton("Отмена", null)
+            .setPositiveButton("Восстановить", null)
+            .create();
+
+        dialog.setOnShowListener(unused ->
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+                .setOnClickListener(v -> {
+                    String password =
+                        input.getText().toString();
+
+                    if (password.isEmpty()) {
+                        input.setError("Введи пароль");
+                        return;
+                    }
+
+                    dialog.dismiss();
+                    importBackup(uri, password);
+                })
+        );
+
+        dialog.show();
+    }
+
+    private void importBackup(Uri uri, String password) {
+        try {
+            byte[] fileBytes = readBackupBytes(uri);
+
+            String fileText = new String(
+                fileBytes,
+                StandardCharsets.UTF_8
+            );
+
+            JSONObject backup = new JSONObject(fileText);
+
+            if (!"MATAEL_BACKUP".equals(
+                    backup.optString("format")) ||
+                backup.optInt("version", -1) != 1) {
+                throw new IllegalArgumentException(
+                    "Неподдерживаемый формат"
+                );
+            }
+
+            byte[] salt = Base64.decode(
+                backup.getString("salt"),
+                Base64.NO_WRAP
+            );
+
+            byte[] iv = Base64.decode(
+                backup.getString("iv"),
+                Base64.NO_WRAP
+            );
+
+            byte[] encrypted = Base64.decode(
+                backup.getString("data"),
+                Base64.NO_WRAP
+            );
+
+            if (salt.length != 16 ||
+                iv.length != 12 ||
+                encrypted.length < 16) {
+                throw new IllegalArgumentException(
+                    "Повреждённая резервная копия"
+                );
+            }
+
+            SecretKey backupKey =
+                deriveBackupKey(password, salt);
+
+            Cipher cipher =
+                Cipher.getInstance("AES/GCM/NoPadding");
+
+            cipher.init(
+                Cipher.DECRYPT_MODE,
+                backupKey,
+                new GCMParameterSpec(128, iv)
+            );
+
+            byte[] decrypted = cipher.doFinal(encrypted);
+
+            String notesText = new String(
+                decrypted,
+                StandardCharsets.UTF_8
+            );
+
+            JSONArray backupNotes =
+                new JSONArray(notesText);
+
+            // Сначала проверяем весь импорт.
+            // Текущие заметки пока не изменяются.
+
+            HashSet<String> backupIds = new HashSet<>();
+
+            for (int i = 0; i < backupNotes.length(); i++) {
+                JSONObject note =
+                    backupNotes.optJSONObject(i);
+
+                if (note == null) {
+                    throw new IllegalArgumentException(
+                        "Некорректная запись в резервной копии"
+                    );
+                }
+
+                String id = note.optString("id", "");
+
+                if (id.isEmpty() ||
+                    !note.has("title") ||
+                    !note.has("body")) {
+                    throw new IllegalArgumentException(
+                        "В заметке отсутствуют обязательные поля"
+                    );
+                }
+
+                if (!backupIds.add(id)) {
+                    throw new IllegalArgumentException(
+                        "В копии обнаружены повторяющиеся записи"
+                    );
+                }
+            }
+
+            JSONArray currentNotes = readNotes();
+
+            if (currentNotes == null) {
+                toast(
+                    "Не удалось прочитать текущие заметки. " +
+                    "Импорт отменён."
+                );
+                return;
+            }
+
+            JSONArray merged = mergeNotes(
+                currentNotes,
+                backupNotes
+            );
+
+            if (!saveEncryptedNotes(merged)) {
+                toast(
+                    "Не удалось сохранить заметки. " +
+                    "Проверь память устройства."
+                );
+                return;
+            }
+
+            showNotes();
+
+            toast(
+                "Импорт завершён. Всего заметок: " +
+                merged.length()
+            );
+
+        } catch (Exception e) {
+            toast(
+                "Не удалось восстановить копию. " +
+                "Проверь файл и пароль."
+            );
+        }
+    }
+
+    private byte[] readBackupBytes(Uri uri)
+            throws Exception {
+        try (InputStream input =
+                 getContentResolver().openInputStream(uri);
+             ByteArrayOutputStream output =
+                 new ByteArrayOutputStream()) {
+
+            if (input == null) {
+                throw new Exception("Не удалось открыть файл");
+            }
+
+            byte[] buffer = new byte[8192];
+            int count;
+            int total = 0;
+
+            while ((count = input.read(buffer)) != -1) {
+                total += count;
+
+                if (total > MAX_BACKUP_BYTES) {
+                    throw new Exception(
+                        "Файл превышает допустимый размер"
+                    );
+                }
+
+                output.write(buffer, 0, count);
+            }
+
+            return output.toByteArray();
+        }
+    }
+
+    // ОБЪЕДИНЕНИЕ ЗАМЕТОК БЕЗ ПЕРЕЗАПИСИ СОВПАДЕНИЙ
+
+    private JSONArray mergeNotes(
+        JSONArray current,
+        JSONArray backup
+    ) {
+        JSONArray merged = new JSONArray();
+        HashSet<String> existingIds = new HashSet<>();
+
+        for (int i = 0; i < current.length(); i++) {
+            JSONObject note = current.optJSONObject(i);
+
+            if (note == null) {
+                continue;
+            }
+
+            String id = note.optString("id", "");
+
+            if (!id.isEmpty() && existingIds.add(id)) {
+                merged.put(note);
+            }
+        }
+
+        for (int i = 0; i < backup.length(); i++) {
+            JSONObject note = backup.optJSONObject(i);
+
+            if (note == null) {
+                continue;
+            }
+
+            String id = note.optString("id", "");
+
+            if (!id.isEmpty() && existingIds.add(id)) {
+                merged.put(note);
+            }
+        }
+
+        return merged;
+    }
+
     // ОФОРМЛЕНИЕ
 
     private LinearLayout createRoot() {
@@ -722,7 +1341,10 @@ public class MainActivity extends Activity {
         view.setGravity(Gravity.CENTER);
 
         if (bold) {
-            view.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+            view.setTypeface(
+                Typeface.DEFAULT,
+                Typeface.BOLD
+            );
         }
 
         root.addView(view, spaced(top, bottom));
@@ -734,14 +1356,17 @@ public class MainActivity extends Activity {
         input.setTextSize(22);
         input.setGravity(Gravity.CENTER);
         input.setHint("••••");
+
         input.setInputType(
             InputType.TYPE_CLASS_NUMBER |
             InputType.TYPE_NUMBER_VARIATION_PASSWORD
         );
+
         input.setPadding(20, 12, 20, 12);
         input.setBackgroundColor(Color.WHITE);
         input.setTextColor(Color.BLACK);
         input.setHintTextColor(Color.GRAY);
+
         return input;
     }
 
@@ -755,13 +1380,15 @@ public class MainActivity extends Activity {
         GradientDrawable shape = new GradientDrawable();
         shape.setColor(gold);
         shape.setCornerRadius(24);
+
         button.setBackground(shape);
 
         return button;
     }
 
     private LinearLayout.LayoutParams spaced(
-        int top, int bottom
+        int top,
+        int bottom
     ) {
         LinearLayout.LayoutParams params =
             new LinearLayout.LayoutParams(
@@ -777,13 +1404,16 @@ public class MainActivity extends Activity {
 
     private LinearLayout.LayoutParams buttonParams() {
         return new LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, 56
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            56
         );
     }
 
     private void toast(String message) {
         Toast.makeText(
-            this, message, Toast.LENGTH_SHORT
+            this,
+            message,
+            Toast.LENGTH_LONG
         ).show();
     }
 }
