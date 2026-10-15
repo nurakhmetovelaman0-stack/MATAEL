@@ -3,29 +3,38 @@ package com.matael.app;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.text.InputType;
 import android.view.Gravity;
+import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
-
-import android.content.SharedPreferences;
 import android.util.Base64;
+
+import android.security.keystore.KeyGenParameterSpec;
+import android.security.keystore.KeyProperties;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.nio.charset.StandardCharsets;
+import java.security.KeyStore;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.UUID;
+
+import javax.crypto.Cipher;
+import javax.crypto.KeyGenerator;
+import javax.crypto.SecretKey;
+import javax.crypto.spec.GCMParameterSpec;
 
 public class MainActivity extends Activity {
 
@@ -36,6 +45,10 @@ public class MainActivity extends Activity {
 
     private SharedPreferences prefs;
 
+    private static final String KEY_ALIAS = "matael_notes_aes_key";
+    private static final String NOTES_KEY = "notes_encrypted";
+    private static final String OLD_NOTES_KEY = "notes_json";
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -43,10 +56,14 @@ public class MainActivity extends Activity {
         getWindow().setStatusBarColor(background);
         getWindow().setNavigationBarColor(background);
 
-        prefs = getSharedPreferences("matael_security", MODE_PRIVATE);
+        prefs = getSharedPreferences(
+            "matael_security", MODE_PRIVATE
+        );
 
         showWelcome();
     }
+
+    // ГЛАВНЫЙ ЭКРАН
 
     private void showWelcome() {
         LinearLayout root = createRoot();
@@ -63,6 +80,7 @@ public class MainActivity extends Activity {
         description.setTextColor(Color.WHITE);
         description.setGravity(Gravity.CENTER);
         description.setLineSpacing(12, 1f);
+
         root.addView(description, spaced(12, 40));
 
         Button button = createButton(
@@ -82,6 +100,8 @@ public class MainActivity extends Activity {
         root.addView(button, buttonParams());
         setContentView(root);
     }
+
+    // СОЗДАНИЕ PIN
 
     private void setupPin() {
         EditText input = createPinInput();
@@ -133,13 +153,14 @@ public class MainActivity extends Activity {
                         return;
                     }
 
-                    if (savePin(firstPin)) {
-                        dialog.dismiss();
-                        showNotes();
-                        toast("Защита настроена");
-                    } else {
+                    if (!savePin(firstPin)) {
                         toast("Не удалось сохранить PIN");
+                        return;
                     }
+
+                    dialog.dismiss();
+                    showNotes();
+                    toast("Защита настроена");
                 })
         );
 
@@ -167,12 +188,44 @@ public class MainActivity extends Activity {
         }
     }
 
+    private boolean verifyPin(String pin) {
+        try {
+            String salt = prefs.getString("pin_salt", "");
+            String savedHash = prefs.getString("pin_hash", "");
+
+            if (salt.isEmpty() || savedHash.isEmpty()) {
+                return false;
+            }
+
+            String enteredHash = hashPin(salt, pin);
+
+            return MessageDigest.isEqual(
+                savedHash.getBytes(StandardCharsets.UTF_8),
+                enteredHash.getBytes(StandardCharsets.UTF_8)
+            );
+
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private String hashPin(String salt, String pin)
+            throws Exception {
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+
+        byte[] result = digest.digest(
+            (salt + ":" + pin).getBytes(StandardCharsets.UTF_8)
+        );
+
+        return Base64.encodeToString(result, Base64.NO_WRAP);
+    }
+
     private void askForPin() {
         EditText input = createPinInput();
 
         AlertDialog dialog = new AlertDialog.Builder(this)
             .setTitle("MATAEL заблокирован")
-            .setMessage("Введи PIN-код")
+            .setMessage("Введи свой PIN-код")
             .setView(input)
             .setNegativeButton("Отмена", null)
             .setPositiveButton("Открыть", null)
@@ -194,51 +247,156 @@ public class MainActivity extends Activity {
         dialog.show();
     }
 
-    private boolean verifyPin(String pin) {
-        try {
-            String salt = prefs.getString("pin_salt", "");
-            String savedHash = prefs.getString("pin_hash", "");
-            String enteredHash = hashPin(salt, pin);
+    // КЛЮЧ ШИФРОВАНИЯ ANDROID KEYSTORE
 
-            return MessageDigest.isEqual(
-                savedHash.getBytes(StandardCharsets.UTF_8),
-                enteredHash.getBytes(StandardCharsets.UTF_8)
+    private SecretKey getNotesKey() throws Exception {
+        KeyStore keyStore = KeyStore.getInstance("AndroidKeyStore");
+        keyStore.load(null);
+
+        if (keyStore.containsAlias(KEY_ALIAS)) {
+            return (SecretKey) keyStore.getKey(KEY_ALIAS, null);
+        }
+
+        KeyGenerator generator = KeyGenerator.getInstance(
+            KeyProperties.KEY_ALGORITHM_AES,
+            "AndroidKeyStore"
+        );
+
+        KeyGenParameterSpec spec =
+            new KeyGenParameterSpec.Builder(
+                KEY_ALIAS,
+                KeyProperties.PURPOSE_ENCRYPT |
+                KeyProperties.PURPOSE_DECRYPT
+            )
+            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+            .setEncryptionPaddings(
+                KeyProperties.ENCRYPTION_PADDING_NONE
+            )
+            .setKeySize(256)
+            .setRandomizedEncryptionRequired(true)
+            .build();
+
+        generator.init(spec);
+        return generator.generateKey();
+    }
+
+    // ШИФРОВАНИЕ AES-GCM
+
+    private String encryptNotes(String plainText) throws Exception {
+        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+
+        cipher.init(Cipher.ENCRYPT_MODE, getNotesKey());
+
+        byte[] encrypted = cipher.doFinal(
+            plainText.getBytes(StandardCharsets.UTF_8)
+        );
+
+        String iv = Base64.encodeToString(
+            cipher.getIV(), Base64.NO_WRAP
+        );
+
+        String data = Base64.encodeToString(
+            encrypted, Base64.NO_WRAP
+        );
+
+        return "v1:" + iv + ":" + data;
+    }
+
+    private String decryptNotes(String stored) throws Exception {
+        String[] parts = stored.split(":", 3);
+
+        if (parts.length != 3 || !"v1".equals(parts[0])) {
+            throw new IllegalArgumentException(
+                "Неизвестный формат зашифрованных данных"
             );
+        }
+
+        byte[] iv = Base64.decode(parts[1], Base64.NO_WRAP);
+        byte[] encrypted = Base64.decode(parts[2], Base64.NO_WRAP);
+
+        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+
+        cipher.init(
+            Cipher.DECRYPT_MODE,
+            getNotesKey(),
+            new GCMParameterSpec(128, iv)
+        );
+
+        return new String(
+            cipher.doFinal(encrypted),
+            StandardCharsets.UTF_8
+        );
+    }
+
+    // ЧТЕНИЕ И МИГРАЦИЯ СТАРЫХ ЗАМЕТОК
+
+    private JSONArray readNotes() {
+        try {
+            if (prefs.contains(NOTES_KEY)) {
+                String encrypted = prefs.getString(NOTES_KEY, "");
+                return new JSONArray(decryptNotes(encrypted));
+            }
+
+            // Перенос заметок из предыдущей версии.
+            String oldText = prefs.getString(OLD_NOTES_KEY, "[]");
+            JSONArray oldNotes = new JSONArray(oldText);
+
+            if (!saveEncryptedNotes(oldNotes)) {
+                return null;
+            }
+
+            return oldNotes;
+
         } catch (Exception e) {
+            toast("Ошибка чтения заметок. Данные не удалены.");
+            return null;
+        }
+    }
+
+    private boolean saveEncryptedNotes(JSONArray notes) {
+        try {
+            String encrypted = encryptNotes(notes.toString());
+
+            return prefs.edit()
+                .putString(NOTES_KEY, encrypted)
+                .remove(OLD_NOTES_KEY)
+                .commit();
+
+        } catch (Exception e) {
+            toast("Ошибка шифрования. Заметки не сохранены.");
             return false;
         }
     }
 
-    private String hashPin(String salt, String pin)
-            throws Exception {
-        MessageDigest digest = MessageDigest.getInstance("SHA-256");
-
-        byte[] result = digest.digest(
-            (salt + ":" + pin).getBytes(StandardCharsets.UTF_8)
-        );
-
-        return Base64.encodeToString(result, Base64.NO_WRAP);
-    }
+    // СПИСОК ЗАМЕТОК
 
     private void showNotes() {
+        JSONArray notes = readNotes();
+
+        if (notes == null) {
+            return;
+        }
+
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(22, 24, 22, 20);
         root.setBackgroundColor(background);
 
         addText(root, "M A T A E L", 26, gold, 4, 4, true);
-        addText(root, "ТВОИ ЛИЧНЫЕ ЗАМЕТКИ", 12, muted, 0, 20, false);
+        addText(
+            root, "ТВОИ ЛИЧНЫЕ ЗАМЕТКИ",
+            12, muted, 0, 20, false
+        );
 
         Button addButton = createButton("+ НОВАЯ ЗАМЕТКА");
         addButton.setOnClickListener(v -> editNote(null));
         root.addView(addButton, buttonParams());
 
         ScrollView scroll = new ScrollView(this);
+
         LinearLayout list = new LinearLayout(this);
         list.setOrientation(LinearLayout.VERTICAL);
         list.setPadding(0, 12, 0, 12);
-
-        JSONArray notes = readNotes();
 
         if (notes.length() == 0) {
             TextView empty = new TextView(this);
@@ -255,9 +413,12 @@ public class MainActivity extends Activity {
 
         for (int i = 0; i < notes.length(); i++) {
             JSONObject note = notes.optJSONObject(i);
-            if (note == null) continue;
 
-            final String id = note.optString("id", "");
+            if (note == null) {
+                continue;
+            }
+
+            String id = note.optString("id", "");
             String title = note.optString("title", "");
             String body = note.optString("body", "");
 
@@ -271,13 +432,17 @@ public class MainActivity extends Activity {
             card.setBackground(shape);
 
             TextView heading = new TextView(this);
-            heading.setText(title.isEmpty() ? "Без названия" : title);
+            heading.setText(
+                title.isEmpty() ? "Без названия" : title
+            );
             heading.setTextColor(gold);
             heading.setTextSize(17);
             heading.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
 
             TextView preview = new TextView(this);
-            preview.setText(body.isEmpty() ? "Пустая заметка" : body);
+            preview.setText(
+                body.isEmpty() ? "Пустая заметка" : body
+            );
             preview.setTextColor(Color.WHITE);
             preview.setTextSize(14);
             preview.setMaxLines(3);
@@ -285,7 +450,6 @@ public class MainActivity extends Activity {
 
             card.addView(heading);
             card.addView(preview);
-
             card.setOnClickListener(v -> editNote(id));
 
             LinearLayout.LayoutParams cardParams =
@@ -293,30 +457,42 @@ public class MainActivity extends Activity {
                     LinearLayout.LayoutParams.MATCH_PARENT,
                     LinearLayout.LayoutParams.WRAP_CONTENT
                 );
+
             cardParams.bottomMargin = 12;
             list.addView(card, cardParams);
         }
 
         scroll.addView(list);
+
         root.addView(scroll, new LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
         ));
 
         Button lockButton = createButton("ЗАБЛОКИРОВАТЬ");
         lockButton.setOnClickListener(v -> showWelcome());
+
         root.addView(lockButton, buttonParams());
 
         setContentView(root);
     }
 
+    // СОЗДАНИЕ И РЕДАКТИРОВАНИЕ
+
     private void editNote(String noteId) {
         JSONArray notes = readNotes();
+
+        if (notes == null) {
+            return;
+        }
+
         JSONObject existing = null;
 
         if (noteId != null) {
             for (int i = 0; i < notes.length(); i++) {
                 JSONObject item = notes.optJSONObject(i);
-                if (item != null && noteId.equals(item.optString("id"))) {
+
+                if (item != null &&
+                    noteId.equals(item.optString("id"))) {
                     existing = item;
                     break;
                 }
@@ -324,7 +500,10 @@ public class MainActivity extends Activity {
         }
 
         final boolean isNew = existing == null;
-        final String id = isNew ? UUID.randomUUID().toString() : noteId;
+
+        final String id = isNew
+            ? UUID.randomUUID().toString()
+            : noteId;
 
         LinearLayout form = new LinearLayout(this);
         form.setOrientation(LinearLayout.VERTICAL);
@@ -336,8 +515,10 @@ public class MainActivity extends Activity {
         titleInput.setTextColor(Color.BLACK);
         titleInput.setHintTextColor(Color.GRAY);
         titleInput.setTextSize(17);
-        titleInput.setInputType(InputType.TYPE_CLASS_TEXT |
-            InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
+        titleInput.setInputType(
+            InputType.TYPE_CLASS_TEXT |
+            InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+        );
         titleInput.setBackgroundColor(Color.WHITE);
         titleInput.setPadding(12, 8, 12, 8);
 
@@ -349,13 +530,15 @@ public class MainActivity extends Activity {
         bodyInput.setGravity(Gravity.TOP);
         bodyInput.setMinLines(6);
         bodyInput.setMaxLines(12);
-        bodyInput.setInputType(InputType.TYPE_CLASS_TEXT |
+        bodyInput.setInputType(
+            InputType.TYPE_CLASS_TEXT |
             InputType.TYPE_TEXT_FLAG_MULTI_LINE |
-            InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
+            InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+        );
         bodyInput.setBackgroundColor(Color.WHITE);
         bodyInput.setPadding(12, 10, 12, 10);
 
-        if (!isNew) {
+        if (!isNew && existing != null) {
             titleInput.setText(existing.optString("title", ""));
             bodyInput.setText(existing.optString("body", ""));
         }
@@ -365,13 +548,16 @@ public class MainActivity extends Activity {
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             );
+
         fieldParams.bottomMargin = 12;
 
         form.addView(titleInput, fieldParams);
         form.addView(bodyInput, fieldParams);
 
         AlertDialog dialog = new AlertDialog.Builder(this)
-            .setTitle(isNew ? "Новая заметка" : "Редактировать заметку")
+            .setTitle(
+                isNew ? "Новая заметка" : "Редактировать заметку"
+            )
             .setView(form)
             .setNegativeButton("Отмена", null)
             .setNeutralButton(isNew ? " " : "Удалить", null)
@@ -379,39 +565,49 @@ public class MainActivity extends Activity {
             .create();
 
         dialog.setOnShowListener(unused -> {
-            if (isNew) {
-                dialog.getButton(AlertDialog.BUTTON_NEUTRAL)
-                    .setVisibility(android.view.View.GONE);
-            } else {
-                dialog.getButton(AlertDialog.BUTTON_NEUTRAL)
-                    .setTextColor(Color.RED);
+            Button deleteButton =
+                dialog.getButton(AlertDialog.BUTTON_NEUTRAL);
 
-                dialog.getButton(AlertDialog.BUTTON_NEUTRAL)
-                    .setOnClickListener(v -> {
-                        new AlertDialog.Builder(this)
-                            .setTitle("Удалить заметку?")
-                            .setMessage("Эту запись нельзя будет вернуть.")
-                            .setNegativeButton("Отмена", null)
-                            .setPositiveButton("Удалить", (d, w) -> {
-                                deleteNote(id);
+            if (isNew) {
+                deleteButton.setVisibility(View.GONE);
+            } else {
+                deleteButton.setTextColor(Color.RED);
+
+                deleteButton.setOnClickListener(v ->
+                    new AlertDialog.Builder(this)
+                        .setTitle("Удалить заметку?")
+                        .setMessage(
+                            "Эту запись нельзя будет вернуть."
+                        )
+                        .setNegativeButton("Отмена", null)
+                        .setPositiveButton("Удалить", (d, w) -> {
+                            if (deleteNote(id)) {
                                 dialog.dismiss();
                                 showNotes();
-                            })
-                            .show();
-                    });
+                                toast("Заметка удалена");
+                            }
+                        })
+                        .show()
+                );
             }
 
             dialog.getButton(AlertDialog.BUTTON_POSITIVE)
                 .setOnClickListener(v -> {
-                    String title = titleInput.getText().toString().trim();
-                    String body = bodyInput.getText().toString().trim();
+                    String title =
+                        titleInput.getText().toString().trim();
+
+                    String body =
+                        bodyInput.getText().toString().trim();
 
                     if (title.isEmpty() && body.isEmpty()) {
                         toast("Напиши заголовок или текст");
                         return;
                     }
 
-                    saveNote(id, title, body);
+                    if (!saveNote(id, title, body)) {
+                        return;
+                    }
+
                     dialog.dismiss();
                     showNotes();
                     toast("Заметка сохранена");
@@ -421,41 +617,9 @@ public class MainActivity extends Activity {
         dialog.show();
     }
 
-    private JSONArray readNotes() {
-        try {
-            return new JSONArray(
-                prefs.getString("notes_json", "[]")
-            );
-        } catch (Exception e) {
-            return new JSONArray();
-        }
-    }
-
-    private void saveNote(String id, String title, String body) {
-        JSONArray oldNotes = readNotes();
-        JSONArray newNotes = new JSONArray();
-        boolean replaced = false;
-
-        for (int i = 0; i < oldNotes.length(); i++) {
-            JSONObject item = oldNotes.optJSONObject(i);
-            if (item == null) continue;
-
-            if (id.equals(item.optString("id"))) {
-                newNotes.put(makeNote(id, title, body));
-                replaced = true;
-            } else {
-                newNotes.put(item);
-            }
-        }
-
-        if (!replaced) {
-            newNotes.put(makeNote(id, title, body));
-        }
-
-        prefs.edit().putString("notes_json", newNotes.toString()).apply();
-    }
-
-    private JSONObject makeNote(String id, String title, String body) {
+    private JSONObject makeNote(
+        String id, String title, String body
+    ) {
         JSONObject note = new JSONObject();
 
         try {
@@ -469,21 +633,69 @@ public class MainActivity extends Activity {
         return note;
     }
 
-    private void deleteNote(String id) {
+    // СОХРАНЕНИЕ ЗАМЕТКИ
+
+    private boolean saveNote(
+        String id, String title, String body
+    ) {
         JSONArray oldNotes = readNotes();
+
+        if (oldNotes == null) {
+            return false;
+        }
+
+        JSONArray newNotes = new JSONArray();
+        boolean replaced = false;
+
+        for (int i = 0; i < oldNotes.length(); i++) {
+            JSONObject item = oldNotes.optJSONObject(i);
+
+            if (item == null) {
+                continue;
+            }
+
+            if (id.equals(item.optString("id"))) {
+                newNotes.put(makeNote(id, title, body));
+                replaced = true;
+            } else {
+                newNotes.put(item);
+            }
+        }
+
+        if (!replaced) {
+            newNotes.put(makeNote(id, title, body));
+        }
+
+        return saveEncryptedNotes(newNotes);
+    }
+
+    // УДАЛЕНИЕ ЗАМЕТКИ
+
+    private boolean deleteNote(String id) {
+        JSONArray oldNotes = readNotes();
+
+        if (oldNotes == null) {
+            return false;
+        }
+
         JSONArray newNotes = new JSONArray();
 
         for (int i = 0; i < oldNotes.length(); i++) {
             JSONObject item = oldNotes.optJSONObject(i);
-            if (item == null) continue;
+
+            if (item == null) {
+                continue;
+            }
 
             if (!id.equals(item.optString("id"))) {
                 newNotes.put(item);
             }
         }
 
-        prefs.edit().putString("notes_json", newNotes.toString()).apply();
+        return saveEncryptedNotes(newNotes);
     }
+
+    // ОФОРМЛЕНИЕ
 
     private LinearLayout createRoot() {
         LinearLayout root = new LinearLayout(this);
@@ -548,14 +760,18 @@ public class MainActivity extends Activity {
         return button;
     }
 
-    private LinearLayout.LayoutParams spaced(int top, int bottom) {
+    private LinearLayout.LayoutParams spaced(
+        int top, int bottom
+    ) {
         LinearLayout.LayoutParams params =
             new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             );
+
         params.topMargin = top;
         params.bottomMargin = bottom;
+
         return params;
     }
 
@@ -566,6 +782,8 @@ public class MainActivity extends Activity {
     }
 
     private void toast(String message) {
-        Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
+        Toast.makeText(
+            this, message, Toast.LENGTH_SHORT
+        ).show();
     }
 }
