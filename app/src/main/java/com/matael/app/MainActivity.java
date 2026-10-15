@@ -50,7 +50,7 @@ public class MainActivity extends Activity {
 
         TextView description = new TextView(this);
         description.setText(
-            "Твои заметки.\\nТвои мысли.\\nТвоё личное пространство."
+            "Твои заметки.\nТвои мысли.\nТвоё личное пространство."
         );
         description.setTextSize(18);
         description.setTextColor(Color.WHITE);
