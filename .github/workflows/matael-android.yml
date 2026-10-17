@@ -1,5 +1,5 @@
 
-name: MATAEL Android Build
+name: MATAEL Build and Word Document
 
 on:
   workflow_dispatch:
@@ -9,14 +9,14 @@ permissions:
 
 jobs:
   build:
-    name: Build MATAEL APK
+    name: Build APK and DOCX
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout source
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Java 17
+      - name: Set up Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -29,16 +29,13 @@ jobs:
           log-accepted-android-sdk-licenses: 'false'
           packages: platform-tools
 
-      - name: Accept Android SDK licenses
-        run: yes | sdkmanager --licenses
-
       - name: Install Android SDK packages
         run: |
+          yes | sdkmanager --licenses
           sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
 
-      - name: Create clean Android manifest
+      - name: Prepare Android manifest
         run: |
-          mkdir -p app/src/main
           cat > app/src/main/AndroidManifest.xml <<'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
@@ -59,21 +56,29 @@ jobs:
           </manifest>
           EOF
 
-      - name: Validate Android manifest
+      - name: Validate manifest
         run: |
-          python3 -c "import xml.etree.ElementTree as ET; ET.parse('app/src/main/AndroidManifest.xml'); print('Manifest XML is valid')"
+          python3 -c "import xml.etree.ElementTree as ET; ET.parse('app/src/main/AndroidManifest.xml')"
 
-      - name: Set up Gradle 8.9
+      - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
 
-      - name: Build MATAEL APK
+      - name: Build Android APK
         run: gradle --no-daemon :app:assembleDebug --stacktrace
 
-      - name: Upload MATAEL APK
+      - name: Install DOCX library
+        run: python3 -m pip install --user python-docx
+
+      - name: Generate Word document
+        run: python3 .github/scripts/build_matael_doc.py
+
+      - name: Upload APK and DOCX
         uses: actions/upload-artifact@v4
         with:
-          name: MATAEL-APK
-          path: app/build/outputs/apk/debug/*.apk
+          name: MATAEL-APK-and-DOCX
+          path: |
+            app/build/outputs/apk/debug/*.apk
+            MATAEL_Исходный_код_и_требования.docx
           if-no-files-found: error
